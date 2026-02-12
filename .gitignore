@@ -1,2 +1,7 @@
 .vscode/
 **test**
+data/tokenized_sample.txt
+data/tokenized_train_data.pkl
+data/tokenized_val_data.pkl
+unsloth_compiled_cache/
+checkpoints/

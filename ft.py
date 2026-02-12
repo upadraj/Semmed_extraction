@@ -16,8 +16,10 @@ from trl import SFTTrainer, SFTConfig
 from datasets import Dataset
 from tqdm import tqdm
 from unsloth import FastLanguageModel, is_bfloat16_supported
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import json
 import re
+import pickle
 
 # Setup
 os.environ["UNSLOTH_RETURN_LOGITS"] = "0"
@@ -39,7 +41,7 @@ base_model = "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit"  # Use this for small
 print(f"Loading base model: {base_model}")
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=base_model,
-    max_seq_length=512,
+    max_seq_length=1024,  # Increased from 512 to handle longer sequences
     dtype=torch.float16,
     load_in_4bit=True,
     device_map="auto",
@@ -49,6 +51,23 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 )
 
 model.gradient_checkpointing_enable()
+
+# Add LoRA adapters for training on quantized model
+print("\nAdding LoRA adapters for efficient fine-tuning...")
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=16,  # LoRA rank
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"],
+    lora_alpha=16,
+    lora_dropout=0,  # Supports any, but = 0 is optimized
+    bias="none",     # Supports any, but = "none" is optimized
+    use_gradient_checkpointing="unsloth",  # True or "unsloth" for very long context
+    random_state=3407,
+    use_rslora=False,  # We support rank stabilized LoRA
+    loftq_config=None, # And LoftQ
+)
+print("LoRA adapters added successfully!")
 
 # Data loading function
 def load_tsv_data(tsv_path: str) -> pd.DataFrame:
@@ -161,17 +180,82 @@ print("\nPreparing training data...")
 df_train_filtered = df_train.drop(few_shot_indices).reset_index(drop=True)
 print(f"Original training samples: {len(df_train)}")
 print(f"Filtered training samples (excluding few-shot): {len(df_train_filtered)}")
+
+# Note: We always re-tokenize to ensure compatibility with current model settings
+# If you want to cache, make sure max_seq_length hasn't changed
+print("\nTokenizing training data (this may take a while)...")
 data = train_tokenize(few_shot, df_train_filtered, prompt)
 print(f"Formatted {len(data)} training examples")
 
+# Save tokenized data for inspection
+tokenized_data_path = "data/tokenized_train_data.pkl"
+print(f"Saving tokenized data to {tokenized_data_path}...")
+os.makedirs("data", exist_ok=True)
+with open(tokenized_data_path, 'wb') as f:
+    pickle.dump(data, f)
+print("Tokenized data saved!")
 
-def training(tokenizer, model, data, ft_pth):
-    """Train the model using SFT (Supervised Fine-Tuning)."""
+# Also save a human-readable sample
+sample_path = "data/tokenized_sample.txt"
+with open(sample_path, 'w') as f:
+    f.write("="*80 + "\n")
+    f.write("SAMPLE OF TOKENIZED TRAINING DATA (First 3 examples)\n")
+    f.write("="*80 + "\n\n")
+    for i in range(min(3, len(data))):
+        f.write(f"\n{'='*80}\n")
+        f.write(f"Example {i+1}:\n")
+        f.write(f"{'='*80}\n")
+        f.write(data[i]['text'])
+        f.write("\n")
+print(f"Sample of tokenized data saved to {sample_path}")
+
+# Prepare validation data for evaluation during training
+print("\nPreparing validation data...")
+print("Tokenizing validation data...")
+val_data = train_tokenize(few_shot, df_val, prompt)
+print(f"Formatted {len(val_data)} validation examples")
+
+# Save validation data
+tokenized_val_path = "data/tokenized_val_data.pkl"
+with open(tokenized_val_path, 'wb') as f:
+    pickle.dump(val_data, f)
+print(f"Tokenized validation data saved to {tokenized_val_path}")
+
+
+def training(tokenizer, model, data, val_data, ft_pth):
+    """Train the model using SFT (Supervised Fine-Tuning) with validation."""
     print("\nStarting training...")
+    print("\n" + "="*80)
+    print("TRAINING CONFIGURATION")
+    print("="*80)
+    print(f"Training samples: {len(data)}")
+    print(f"Validation samples: {len(val_data)}")
+    print(f"Learning rate: 3e-4")
+    print(f"Batch size: 2 (per device)")
+    print(f"Gradient accumulation steps: 2")
+    print(f"Effective batch size: {2 * 2} (batch_size * grad_accum)")
+    print(f"Epochs: 2")
+    print(f"Optimizer: adamw_8bit")
+    print("="*80 + "\n")
+
+    print("HOW LOSS IS CALCULATED:")
+    print("-" * 80)
+    print("During training, the model:")
+    print("1. Receives the input (system prompt + few-shot + user question)")
+    print("2. Predicts the next tokens (the label)")
+    print("3. Compares predictions with TRUE LABEL from your data")
+    print("4. Calculates cross-entropy loss between predicted and true tokens")
+    print("5. Updates model weights to minimize this loss")
+    print("-" * 80 + "\n")
+
+    # Set this right before creating trainer (required by Unsloth 2024.11+)
+    os.environ["UNSLOTH_RETURN_LOGITS"] = "1"
+
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=data,
+        eval_dataset=val_data,  # Add validation dataset
         args=SFTConfig(
             packing=False,
             dataset_num_proc=2,
@@ -191,17 +275,30 @@ def training(tokenizer, model, data, ft_pth):
             output_dir="checkpoints",
             report_to="none",
             logging_dir="logs",
+            # Evaluation settings
+            eval_strategy="steps",  # Evaluate during training
+            eval_steps=50,  # Evaluate every 50 steps
+            save_strategy="steps",
+            save_steps=100,
+            load_best_model_at_end=True,
+            metric_for_best_model="eval_loss",
         ),
     )
 
     train_result = trainer.train()
-    print(f"\nTraining completed!")
-    print(train_result)
+    print(f"\n{'='*80}")
+    print("TRAINING COMPLETED!")
+    print("="*80)
+    print(f"Training loss: {train_result.training_loss:.4f}")
+    print(f"Training steps: {train_result.global_step}")
+    print("="*80 + "\n")
 
     print(f"Saving model to {ft_pth}...")
     trainer.save_model(ft_pth)
     tokenizer.save_pretrained(ft_pth)
     print("Model saved successfully!")
+
+    return trainer
 
 
 def convert_label(output_text):
@@ -233,9 +330,7 @@ def model_inference(few_shot, model, tokenizer, df, prompt, device):
         chat = chat + few_shot
 
         row = df.iloc[i]
-        user_content = f"""Sentence: {row['sentence']}
-Subject: {row['subject_text']} (Type: {row['subject_type']})
-Object: {row['object_text']} (Type: {row['object_type']})"""
+        user_content = f"""Sentence: {row['sentence']} Subject: {row['subject_text']} (Type: {row['subject_type']}) Object: {row['object_text'] }(Type: {row['object_type']})"""
         chat.append({"role": "user", "content": user_content})
 
         f_input = tokenizer.apply_chat_template(chat, tokenize=False)
@@ -254,11 +349,83 @@ Object: {row['object_text']} (Type: {row['object_type']})"""
     return predicted_labels
 
 
-# Uncomment to train
-# training(tokenizer, model, data, ft_pth)
+def evaluate_model(few_shot, model, tokenizer, df, prompt, device, dataset_name="Test"):
+    """Evaluate model and print detailed metrics."""
+    print(f"\n{'='*80}")
+    print(f"EVALUATING ON {dataset_name.upper()} SET")
+    print("="*80)
+
+    # Get predictions
+    predicted_labels = model_inference(few_shot, model, tokenizer, df, prompt, device)
+    true_labels = df['label'].tolist()
+
+    # Calculate accuracy
+    accuracy = accuracy_score(true_labels, predicted_labels)
+    print(f"\n{dataset_name} Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)")
+
+    # Print classification report
+    print(f"\n{'-'*80}")
+    print("CLASSIFICATION REPORT:")
+    print("-"*80)
+    print(classification_report(true_labels, predicted_labels, zero_division=0))
+
+    # Save predictions to file
+    results_df = df.copy()
+    results_df['predicted_label'] = predicted_labels
+    results_df['correct'] = results_df['label'] == results_df['predicted_label']
+
+    output_file = f"results/{dataset_name.lower()}_predictions.tsv"
+    os.makedirs("results", exist_ok=True)
+    results_df.to_csv(output_file, sep='\t', index=False)
+    print(f"\nPredictions saved to: {output_file}")
+
+    # Show some examples of correct and incorrect predictions
+    print(f"\n{'-'*80}")
+    print("SAMPLE CORRECT PREDICTIONS:")
+    print("-"*80)
+    correct_samples = results_df[results_df['correct']].head(3)
+    for _, row in correct_samples.iterrows():
+        print(f"\nSentence: {row['sentence'][:100]}...")
+        print(f"True: {row['label']} | Predicted: {row['predicted_label']} ✓")
+
+    print(f"\n{'-'*80}")
+    print("SAMPLE INCORRECT PREDICTIONS:")
+    print("-"*80)
+    incorrect_samples = results_df[~results_df['correct']].head(3)
+    for _, row in incorrect_samples.iterrows():
+        print(f"\nSentence: {row['sentence'][:100]}...")
+        print(f"True: {row['label']} | Predicted: {row['predicted_label']} ✗")
+
+    print("="*80 + "\n")
+
+    return accuracy, predicted_labels
+
 
 print("\n" + "="*80)
-print("Training setup complete!")
-print("To train the model, uncomment the training() call at the end of this script")
+print("STARTING TRAINING AND EVALUATION PIPELINE")
 print("="*80)
+
+# Train the model
+trainer = training(tokenizer, model, data, val_data, ft_pth)
+
+# Evaluate on validation set
+print("\n" + "="*80)
+print("EVALUATING ON VALIDATION SET")
+print("="*80)
+val_accuracy, _ = evaluate_model(few_shot, model, tokenizer, df_val, prompt, device, "Validation")
+
+# Evaluate on test set
+print("\n" + "="*80)
+print("EVALUATING ON TEST SET")
+print("="*80)
+test_accuracy, _ = evaluate_model(few_shot, model, tokenizer, df_test, prompt, device, "Test")
+
+# Final summary
+print("\n" + "="*80)
+print("FINAL RESULTS SUMMARY")
+print("="*80)
+print(f"Validation Accuracy: {val_accuracy:.4f} ({val_accuracy*100:.2f}%)")
+print(f"Test Accuracy: {test_accuracy:.4f} ({test_accuracy*100:.2f}%)")
+print("="*80)
+
 
