@@ -75,22 +75,31 @@ trainer = SFTTrainer(
     dataset_text_field="text",
     max_seq_length=max_seq_length,
     args=SFTConfig(
-        per_device_train_batch_size=4, # H100 can handle larger batches
+        per_device_train_batch_size=4, 
         gradient_accumulation_steps=2,
         warmup_steps=5,
         max_steps=100, 
         learning_rate=2e-4,
-        bf16=True, # Optimized for H100
+        bf16=True, 
         logging_steps=5,
         output_dir="outputs",
-        optim="adamw_8bit", # Still use 8bit optimizer to save VRAM for longer context
+        optim="adamw_8bit",
         seed=3407,
     ),
 )
 
 trainer.train()
 
-# 7. INFERENCE & EVALUATION
+# 7. SAVE MODEL
+print("Saving model...")
+model.save_pretrained("lora_model")  # Saves LoRA adapters
+tokenizer.save_pretrained("lora_model")  # Saves tokenizer
+
+# Optionally save merged model (LoRA + base model)
+print("Saving merged model...")
+model.save_pretrained_merged("model_merged", tokenizer, save_method="merged_16bit")
+
+# 8. INFERENCE & EVALUATION
 FastLanguageModel.for_inference(model)
 
 def predict(df):
