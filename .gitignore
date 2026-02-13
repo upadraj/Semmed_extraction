@@ -4,3 +4,11 @@ data/tokenized_train_data.pkl
 data/tokenized_val_data.pkl
 unsloth_compiled_cache/
 checkpoints/
+data/few_shot.json
+data/few_shot.out
+data/new_train.out
+lora_model/
+model_merged/
+outputs/
+
+**__pycache__/
