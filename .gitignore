@@ -12,3 +12,5 @@ model_merged/
 outputs/
 
 **__pycache__/
+**nohup**
+**.csv**
