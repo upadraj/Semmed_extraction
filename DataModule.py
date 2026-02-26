@@ -153,21 +153,26 @@ def load_model_and_tokenizer(
 ):
     """
     Load the base model and tokenizer.
-    
+
     Args:
         model_name: Name or path of the model to load
         max_seq_length: Maximum sequence length
         dtype: Data type for model weights
         load_in_4bit: Whether to load model in 4-bit quantization
-        
+
     Returns:
         tuple: (model, tokenizer)
     """
+    # Set device_map to current device to avoid multi-GPU issues with quantized models
+    # This is required when using 4-bit/8-bit quantization or 8-bit optimizers
+    device_map = {"": torch.cuda.current_device()} if torch.cuda.is_available() else None
+
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_name,
         max_seq_length=max_seq_length,
         dtype=dtype,
         load_in_4bit=load_in_4bit,
+        device_map=device_map,
     )
     return model, tokenizer
 

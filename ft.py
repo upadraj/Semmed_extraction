@@ -135,7 +135,7 @@ def run_evaluation(df, output_csv="test_results_full.csv"):
     df['predicted_label'] = predictions
     
     # Save the dataframe for inspection
-    df.to_csv(output_csv, index=False, sep="\t")
+    df.to_csv(output_csv, index=False, sep=',')
     return predictions
 
 print("Starting Final Evaluation...")

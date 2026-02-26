@@ -115,7 +115,7 @@ def run_evaluation(model, tokenizer, df, output_csv="test_results_full.csv",
     df['predicted_label'] = predictions
     
     # Save detailed results
-    df.to_csv(output_csv, index=False, sep="\t")
+    df.to_csv(output_csv, index=False)
     print(f"✓ Detailed results saved to: {output_csv}")
     
     return predictions

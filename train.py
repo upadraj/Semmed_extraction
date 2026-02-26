@@ -92,12 +92,12 @@ def main():
     print("\n[4/6] Configuring trainer...")
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,  # Updated from 'tokenizer' parameter
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        dataset_text_field="text",
-        max_seq_length=MAX_SEQ_LENGTH,
         args=SFTConfig(
+            dataset_text_field="text",  # Moved here from SFTTrainer
+            max_seq_length=MAX_SEQ_LENGTH,  # Moved here from SFTTrainer
             per_device_train_batch_size=TRAIN_BATCH_SIZE,
             gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
             warmup_steps=WARMUP_STEPS,
